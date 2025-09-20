@@ -233,3 +233,105 @@
     (ok true)
   )
 )
+
+;; STAKING & YIELD GENERATION
+
+;; Activates assets for yield generation through community staking
+(define-public (stake-nft (token-id uint))
+  (let ((token (unwrap! (get-token-info token-id) err-invalid-token)))
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (not (get is-staked token)) err-already-staked)
+    (map-set tokens { token-id: token-id }
+      (merge token {
+        is-staked: true,
+        stake-timestamp: stacks-block-height,
+      })
+    )
+    (map-set staking-rewards { token-id: token-id } {
+      accumulated-yield: u0,
+      last-claim: stacks-block-height,
+    })
+    (var-set total-staked (+ (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; Withdraws assets from staking and claims accumulated rewards
+(define-public (unstake-nft (token-id uint))
+  (let (
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+      (rewards (unwrap! (get-staking-rewards token-id) err-not-staked))
+    )
+    (asserts! (is-eq tx-sender (get owner token)) err-not-token-owner)
+    (asserts! (get is-staked token) err-not-staked)
+    ;; Process final reward distribution
+    (try! (claim-staking-rewards token-id))
+    (map-set tokens { token-id: token-id }
+      (merge token {
+        is-staked: false,
+        stake-timestamp: u0,
+      })
+    )
+    (var-set total-staked (- (var-get total-staked) u1))
+    (ok true)
+  )
+)
+
+;; DATA QUERY FUNCTIONS
+
+;; Retrieves comprehensive asset metadata
+(define-read-only (get-token-info (token-id uint))
+  (map-get? tokens { token-id: token-id })
+)
+
+;; Retrieves marketplace listing details
+(define-read-only (get-listing (token-id uint))
+  (map-get? token-listings { token-id: token-id })
+)
+
+;; Retrieves fractional ownership information
+(define-read-only (get-fractional-shares
+    (token-id uint)
+    (owner principal)
+  )
+  (map-get? fractional-ownership {
+    token-id: token-id,
+    owner: owner,
+  })
+)
+
+;; Retrieves staking rewards accumulation data
+(define-read-only (get-staking-rewards (token-id uint))
+  (map-get? staking-rewards { token-id: token-id })
+)
+
+;; Calculates real-time staking rewards based on network participation
+(define-read-only (calculate-rewards (token-id uint))
+  (let (
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+      (rewards (unwrap! (get-staking-rewards token-id) err-not-staked))
+      (blocks-staked (- stacks-block-height (get stake-timestamp token)))
+      (yield-per-block (/ (var-get yield-rate) u52560)) ;; Approximate blocks per year
+      (new-rewards (* blocks-staked yield-per-block))
+    )
+    (ok (+ (get accumulated-yield rewards) new-rewards))
+  )
+)
+
+;; INTERNAL REWARD SYSTEM
+
+;; Processes and distributes accumulated staking rewards
+(define-private (claim-staking-rewards (token-id uint))
+  (let (
+      (rewards (unwrap! (calculate-rewards token-id) err-not-staked))
+      (token (unwrap! (get-token-info token-id) err-invalid-token))
+    )
+    (asserts! (get is-staked token) err-not-staked)
+    (map-set staking-rewards { token-id: token-id } {
+      accumulated-yield: u0,
+      last-claim: stacks-block-height,
+    })
+    ;; Execute reward distribution to asset owner
+    (as-contract (stx-transfer? rewards (as-contract tx-sender) (get owner token)))
+  )
+)
